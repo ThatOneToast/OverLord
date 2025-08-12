@@ -1,0 +1,4 @@
+name: OverLord
+version: '1.0'
+main: server.OverLord
+api-version: '1.21'
