@@ -34,33 +34,34 @@ class OverLord : JavaPlugin() {
             val processors = listOf(EventPriorityRemover())
             val jarSanitizer = JarSanitizer(processors)
 
-            val report = jarSanitizer.processJar(candidate.file, Mode.SCAN)
-            if (report.findings.isNotEmpty()) {
-                log.warn("Plugin %s has %s possible rule breakers.", candidate.name, report.findings.size)
+            val before = jarSanitizer.processJar(candidate.file, Mode.SCAN)
+            if (before.findings.isNotEmpty()) {
+                log.warn("Plugin %s has %s possible rule breakers.", candidate.name, before.findings.size)
                 log.warn("Attempting to sanitize %s", candidate.name)
-                val report = jarSanitizer.processJar(candidate.file, Mode.SANITIZE)
-                if (report.findings.size != report.modifiedClasses.size) {
-                    log.warn("Plugin %s has mismatched findings and solutions. Plugin will not be loaded.", candidate.name)
-                    log.debug("Plugin %s, report: %s", candidate.name, report)
+
+                val sanitizeReport = jarSanitizer.processJar(candidate.file, Mode.SANITIZE)
+                log.debug("Sanitize modified classes: %s".format(sanitizeReport.modifiedClasses.size))
+
+                val after = jarSanitizer.processJar(candidate.file, Mode.SCAN)
+                if (after.findings.isNotEmpty()) {
+                    log.warn("Plugin %s still has %s possible rule breakers after sanitization; will not be loaded.",
+                        candidate.name, after.findings.size)
+                    log.debug("Plugin %s final report: %s", candidate.name, after)
                 } else {
-                    val finalReport = jarSanitizer.processJar(candidate.file, Mode.SCAN)
-                    if (finalReport.findings.isNotEmpty()) {
-                        log.warn("Plugin %s still has %s possible rule breakers", candidate.name, finalReport.findings.size)
-                        log.warn("Plugin %s will not be loaded", candidate.name)
-                        log.debug("Plugin %s report: %s ", candidate.name, finalReport)
-                    } else {
-                        canLoad = true
-                    }
+                    canLoad = true
                 }
+            } else {
+                canLoad = true
             }
 
             if (canLoad) {
                 PluginManager.loadPlugin(candidate)
+                val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
+                log.info("Plugin %s loading and sanitization took %sms", candidate.name, elapsedMs)
             }
         }
 
-        val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
-        log.info("Plugin loading and sanitization took %sms", elapsedMs)
+
     }
 
 
