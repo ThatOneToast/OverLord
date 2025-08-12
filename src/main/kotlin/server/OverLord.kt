@@ -2,6 +2,8 @@ package server
 
 import org.bukkit.plugin.java.JavaPlugin
 import server.processors.EventPriorityRemover
+import java.net.http.HttpClient
+import java.time.Duration
 
 class OverLord : JavaPlugin() {
 
@@ -68,10 +70,19 @@ class OverLord : JavaPlugin() {
 
     override fun onEnable() {
         // Plugin startup logic
+
+        httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .build()
+
+        Watchdog.gamemodeTask.runTaskTimer(this, 0L, 20L)
+
+        Watchdog.sendDiscordWebhook("The server is now Online")
     }
 
     override fun onDisable() {
         // Plugin shutdown logic
+        Watchdog.sendDiscordWebhook("The server is now Offline")
     }
 
 
@@ -81,6 +92,10 @@ class OverLord : JavaPlugin() {
 
         @JvmStatic
         lateinit var log: PluginLogger
+
+        @JvmStatic
+        lateinit var httpClient: HttpClient
+
 
 
     }
