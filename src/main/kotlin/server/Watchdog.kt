@@ -14,11 +14,18 @@ import java.util.Locale
 object Watchdog {
 
     private val httpClient: HttpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build()
-    private const val WEBHOOK_URL = "https://discord.com/api/webhooks/1404905055315820615/m30LgogCKNiUA6kdSa8T-7XJ7H0Vyk3QGlSCwWtHuCVGuFO3P9PQI0Fab5yT6wayykfd"
+    private val WEBHOOK_URL: String? = OverLord.stateConfig.get("discord.webhook_url", "")
     private const val FACELESS_ID = "1021466844999200891"
     private const val TOAST_ID = "885368325486559253"
     val modIds = listOf(FACELESS_ID, TOAST_ID)
     val mentionText = modIds.joinToString(" ") { id -> "<@$id>" }
+
+    init {
+        if (WEBHOOK_URL == null) {
+            OverLord.log.error("Discord web hook isn't valid. It is null. Plugin will be disabled.", NullPointerException("WEBHOOK_URL is null, please check the config."))
+            OverLord.instance.server.pluginManager.disablePlugin(OverLord.instance)
+        }
+    }
 
     val gamemodeTask = object : BukkitRunnable() {
         override fun run() {
@@ -70,6 +77,11 @@ object Watchdog {
     }
 
     fun sendDiscordWebhook(jsonPayload: String) {
+        if (WEBHOOK_URL == null) {
+            OverLord.log.warn("Attempted usage of discord webhook without valid Webhook URL")
+            return
+        }
+
         val uri = try { URI.create(WEBHOOK_URL) }
         catch (ex: Exception) { OverLord.log.error("Invalid webhook URL", ex); return }
 

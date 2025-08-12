@@ -3,8 +3,12 @@ package server
 import org.bukkit.plugin.java.JavaPlugin
 import server.Watchdog.DiscordEmbedBuilder
 import server.processors.EventPriorityRemover
+import java.io.File
 import java.net.http.HttpClient
+import java.nio.file.Files
 import java.time.Duration
+import kotlin.io.path.Path
+import kotlin.io.path.exists
 
 class OverLord : JavaPlugin() {
 
@@ -17,9 +21,17 @@ class OverLord : JavaPlugin() {
         log.info("OverLord Loaded, logger enabled.")
 
         val pluginsFolder = this.dataFolder.absolutePath + "/plugins"
+        if (!Path(pluginsFolder).exists()) {
+            Files.createDirectory(Path(pluginsFolder))
+        }
         log.info("Scanning %s directory", pluginsFolder)
         PluginManager.scanDirectory(pluginsFolder, false)
 
+        val configFile = File(this.dataFolder.absolutePath + "/config.toml")
+        if (!configFile.exists()) {
+            configFile.createNewFile()
+        }
+        stateConfig = TomlConfig(configFile)
 
         val start = System.nanoTime()
 
@@ -115,6 +127,9 @@ class OverLord : JavaPlugin() {
 
         @JvmStatic
         lateinit var httpClient: HttpClient
+
+        @JvmStatic
+        lateinit var stateConfig: TomlConfig
 
 
 
