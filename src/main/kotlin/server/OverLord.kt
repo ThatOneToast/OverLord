@@ -1,6 +1,7 @@
 package server
 
 import org.bukkit.plugin.java.JavaPlugin
+import server.Watchdog.DiscordEmbedBuilder
 import server.processors.EventPriorityRemover
 import java.net.http.HttpClient
 import java.time.Duration
@@ -76,13 +77,32 @@ class OverLord : JavaPlugin() {
             .build()
 
         Watchdog.gamemodeTask.runTaskTimer(this, 0L, 20L)
+        Watchdog.operatorTask.runTaskTimer(this, 0L, 20L)
 
-        Watchdog.sendDiscordWebhook("The server is now Online")
+        val message = DiscordEmbedBuilder()
+            .title("Server Status")
+            .description("Availability: Online ✅")
+            .color(0x0FF00)
+            .footer("OverLord Watchdog")
+
+        Watchdog.sendDiscordWebhook(message.buildPayload())
     }
 
     override fun onDisable() {
         // Plugin shutdown logic
-        Watchdog.sendDiscordWebhook("The server is now Offline")
+
+        Watchdog.gamemodeTask.cancel()
+        Watchdog.operatorTask.cancel()
+
+        val message = DiscordEmbedBuilder()
+            .title("Server Status")
+            .description("Availability: Offline ❌")
+            .color(0xFF6600)
+            .footer("OverLord Watchdog")
+
+        Watchdog.sendDiscordWebhook(message.buildPayload())
+
+
     }
 
 
