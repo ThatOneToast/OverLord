@@ -14,8 +14,6 @@ object PluginManager {
 
     private val queue: Queue<PluginCandidate> = ConcurrentLinkedQueue()
 
-    val verifyer = EventHandlerPriorityTool
-
     fun nextCandidate(): PluginCandidate? = queue.poll()
 
     fun peekCandidate(): PluginCandidate? = queue.peek()
@@ -92,10 +90,6 @@ object PluginManager {
         OverLord.instance.server.pluginManager.loadPlugin(pluginCandidate.file.toFile())
         val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
         OverLord.log.info("Plugin %s loaded in %sms", pluginCandidate.name, elapsedMs)
-    }
-
-    fun verifyPlugin(candidate: PluginCandidate) {
-
     }
 
 }
