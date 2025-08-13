@@ -1,7 +1,10 @@
 package server
 
+import org.bukkit.event.server.PluginEvent
+import org.bukkit.event.world.ChunkLoadEvent
 import org.bukkit.plugin.java.JavaPlugin
 import server.Watchdog.DiscordEmbedBuilder
+import server.agent.AgentBridge
 import server.brigadier.CommandRegistrar
 import server.packet.PacketListenerInjector
 import server.processors.EventPriorityRemover
@@ -24,6 +27,29 @@ class OverLord : JavaPlugin() {
 
         log = PluginLogger(this, debugEnabled = true)
         log.info("OverLord Loaded, logger enabled.")
+
+        log.info("OverLord-Agent: Adding forbidden signatures.")
+        AgentBridge.addForbiddenSignature(
+            ".*CraftWorld.*",
+            "setChunkForceLoaded",
+            "Bukkit API force-load"
+        )
+        AgentBridge.addForbiddenSignature(
+            "net\\.minecraft\\.server\\..*ChunkProviderServer.*",
+            "loadChunk|getChunk.*",
+            "NMS chunk providers"
+        )
+        AgentBridge.addForbiddenSignature(
+            ".*PlayerChunkMap.*",
+            "addTicket|removeTicket",
+            "PlayerChunkMap tickets"
+        )
+        AgentBridge.addForbiddenSignature(
+            "org\\.bukkit\\.World",
+            "setChunkForceLoaded",
+            "Bukkit API force-load"
+        )
+        
 
         val pluginsFolder = this.dataFolder.absolutePath + "/plugins"
         if (!Path(pluginsFolder).exists()) {
@@ -51,6 +77,7 @@ class OverLord : JavaPlugin() {
 
             var canLoad = false
 
+            if (!AgentBridge.isJarAllowed(candidate.file.toFile(), true)) return;
             val processors = listOf(EventPriorityRemover())
             val jarSanitizer = JarSanitizer(processors)
 
@@ -84,8 +111,6 @@ class OverLord : JavaPlugin() {
 
     }
 
-
-
     override fun onEnable() {
         // Plugin startup logic
 
@@ -117,6 +142,11 @@ class OverLord : JavaPlugin() {
 
         Watchdog.gamemodeTask.cancel()
         Watchdog.operatorTask.cancel()
+
+        packManager.disable()
+        AgentBridge.shutdownWriter()
+
+        log.shutdown()
 
         val message = DiscordEmbedBuilder()
             .title("Server Status")
