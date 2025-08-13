@@ -4,18 +4,19 @@ import server.OverLord
 import org.objectweb.asm.*
 import java.io.File
 import java.io.InputStream
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption
 import java.time.Instant
+import java.util.ArrayList
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.regex.Pattern
-import java.nio.charset.StandardCharsets
-import java.nio.file.StandardOpenOption
 import java.util.jar.JarFile
+import java.util.regex.Pattern
 
 data class Incident(
     val ts: Instant,
@@ -25,7 +26,11 @@ data class Incident(
     val args: String
 )
 
-data class ForbiddenSignature(val typeRegex: Pattern, val methodRegex: Pattern, val desc: String? = null) {
+data class ForbiddenSignature(
+    val typeRegex: Pattern,
+    val methodRegex: Pattern,
+    val desc: String? = null
+) {
     constructor(typeRegex: String, methodRegex: String, desc: String? = null)
             : this(Pattern.compile(typeRegex), Pattern.compile(methodRegex), desc)
 }
@@ -54,8 +59,7 @@ data class ForbiddenFieldSignature(
     val fieldNameRegex: Pattern? = null,
     val desc: String? = null
 ) {
-    constructor(ownerTypeRegex: String, fieldNameRegex: String? = null,
-                desc: String? = null)
+    constructor(ownerTypeRegex: String, fieldNameRegex: String? = null, desc: String? = null)
             : this(Pattern.compile(ownerTypeRegex),
         fieldNameRegex?.let { Pattern.compile(it) },
         desc)
@@ -78,8 +82,15 @@ data class ForbiddenScanResult(
 @Suppress("unused")
 object AgentBridge {
     private const val ASM_API = Opcodes.ASM9
+
     private val INCIDENTS = ConcurrentLinkedQueue<Incident>()
     private val COUNTS = ConcurrentHashMap<String, AtomicInteger>()
+
+    // plugin metadata cache: jarPath -> (pluginName?, setOfClassNames)
+    private val PLUGIN_META_CACHE = ConcurrentHashMap<String, Pair<String?, Set<String>>>()
+
+    // classFqcn -> pluginName
+    private val CLASS_TO_PLUGIN = ConcurrentHashMap<String, String>()
 
     private val writer = Executors.newSingleThreadExecutor { r ->
         Thread(r, "overlord-agent-writer").apply { isDaemon = true }
@@ -95,11 +106,10 @@ object AgentBridge {
         "addTicket", "ChunkTicketManager", "chunkticket", "loadChunk", "provideChunk"
     )
 
-
+    // ----- Forbidden signature APIs -----
 
     fun addForbiddenSignature(typeRegex: String, methodRegex: String, description: String? = null) =
         forbiddenSignatures.add(ForbiddenSignature(typeRegex, methodRegex, description))
-
 
     fun clearForbiddenSignatures() {
         forbiddenSignatures.clear()
@@ -110,21 +120,22 @@ object AgentBridge {
         enumTypeRegex: String? = null,
         paramName: String? = null,
         description: String? = null
-    ) = forbiddenAnnotationSignatures.add(ForbiddenAnnotationSignature(annotationTypeRegex, enumTypeRegex, paramName, description))
-
+    ) = forbiddenAnnotationSignatures.add(
+        ForbiddenAnnotationSignature(annotationTypeRegex, enumTypeRegex, paramName, description)
+    )
 
     fun clearForbiddenAnnotationSignatures() {
         forbiddenAnnotationSignatures.clear()
     }
 
-
-    fun addForbiddenFieldSignature(ownerTypeRegex: String, fieldNameRegex: String? = null, description: String? = null)  =
+    fun addForbiddenFieldSignature(ownerTypeRegex: String, fieldNameRegex: String? = null, description: String? = null) =
         forbiddenFieldSignatures.add(ForbiddenFieldSignature(ownerTypeRegex, fieldNameRegex, description))
-
 
     fun clearForbiddenFieldSignatures() {
         forbiddenFieldSignatures.clear()
     }
+
+    // ----- Scanning -----
 
     /**
      * Scan a plugin jar file for forbidden invocations and suspicious strings.
@@ -226,6 +237,7 @@ object AgentBridge {
         return dest
     }
 
+    // ----- Incident recording -----
 
     fun record(origin: String, detectedPlugin: String?, frames: String, args: String) {
         val inc = Incident(Instant.now(), origin, detectedPlugin, frames, args)
@@ -272,6 +284,7 @@ object AgentBridge {
         writer.shutdownNow()
     }
 
+    // ----- Classfile scanning implementation -----
 
     private fun scanClassStream(ins: InputStream, matchesOut: MutableList<Match>) {
         try {
@@ -280,14 +293,7 @@ object AgentBridge {
             val suspiciousCollector = ArrayList<String>()
 
             val cv = object : ClassVisitor(ASM_API) {
-                override fun visit(
-                    version: Int,
-                    access: Int,
-                    name: String?,
-                    signature: String?,
-                    superName: String?,
-                    interfaces: Array<out String>?
-                ) {
+                override fun visit(version: Int, access: Int, name: String?, signature: String?, superName: String?, interfaces: Array<out String>?) {
                     classNameRef[0] = name?.replace('/', '.')
                     super.visit(version, access, name, signature, superName, interfaces)
                 }
@@ -297,26 +303,15 @@ object AgentBridge {
                     return object : AnnotationVisitor(ASM_API, av) {
                         override fun visitEnum(name: String?, descriptor: String?, value: String?) {
                             try {
-                                val annotationDot = desc?.removePrefix("L")
-                                    ?.removeSuffix(";")?.replace('/', '.') ?: return
-                                val enumDot = descriptor?.removePrefix("L")
-                                    ?.removeSuffix(";")?.replace('/', '.') ?: return
+                                val annotationDot = desc?.removePrefix("L")?.removeSuffix(";")?.replace('/', '.') ?: return
+                                val enumDot = descriptor?.removePrefix("L")?.removeSuffix(";")?.replace('/', '.') ?: return
 
                                 for (sig in forbiddenAnnotationSignatures) {
                                     if (sig.annotationTypeRegex.matcher(annotationDot).find()
-                                        && (sig.enumTypeRegex == null
-                                                || sig.enumTypeRegex.matcher(enumDot).find())
+                                        && (sig.enumTypeRegex == null || sig.enumTypeRegex.matcher(enumDot).find())
                                         && (sig.paramName == null || sig.paramName == name)
                                     ) {
-                                        matchesOut.add(
-                                            Match(
-                                                classNameRef[0] ?: "unknown",
-                                                "<class>",
-                                                annotationDot,
-                                                "$name=$value",
-                                                enumDot
-                                            )
-                                        )
+                                        matchesOut.add(Match(classNameRef[0] ?: "unknown", "<class>", annotationDot, "$name=$value", enumDot))
                                     }
                                 }
                             } catch (_: Throwable) {}
@@ -325,13 +320,7 @@ object AgentBridge {
                     }
                 }
 
-                override fun visitMethod(
-                    access: Int,
-                    name: String?,
-                    descriptor: String?,
-                    signature: String?,
-                    exceptions: Array<out String>?
-                ): MethodVisitor {
+                override fun visitMethod(access: Int, name: String?, descriptor: String?, signature: String?, exceptions: Array<out String>?): MethodVisitor {
                     val methodName = name ?: "<init?>"
                     val parentClass = classNameRef[0] ?: "unknown"
                     var lastEnumLoad: Pair<String, String>? = null
@@ -340,29 +329,17 @@ object AgentBridge {
                         override fun visitAnnotation(desc: String?, visible: Boolean): AnnotationVisitor {
                             val av = super.visitAnnotation(desc, visible)
                             return object : AnnotationVisitor(ASM_API, av) {
-                                override fun visitEnum(name: String?, descriptor: String?,
-                                                       value: String?) {
+                                override fun visitEnum(name: String?, descriptor: String?, value: String?) {
                                     try {
-                                        val annotationDot = desc?.removePrefix("L")
-                                            ?.removeSuffix(";")?.replace('/', '.') ?: return
-                                        val enumDot = descriptor?.removePrefix("L")
-                                            ?.removeSuffix(";")?.replace('/', '.') ?: return
+                                        val annotationDot = desc?.removePrefix("L")?.removeSuffix(";")?.replace('/', '.') ?: return
+                                        val enumDot = descriptor?.removePrefix("L")?.removeSuffix(";")?.replace('/', '.') ?: return
 
                                         for (sig in forbiddenAnnotationSignatures) {
                                             if (sig.annotationTypeRegex.matcher(annotationDot).find()
-                                                && (sig.enumTypeRegex == null
-                                                        || sig.enumTypeRegex.matcher(enumDot).find())
+                                                && (sig.enumTypeRegex == null || sig.enumTypeRegex.matcher(enumDot).find())
                                                 && (sig.paramName == null || sig.paramName == name)
                                             ) {
-                                                matchesOut.add(
-                                                    Match(
-                                                        parentClass,
-                                                        methodName,
-                                                        annotationDot,
-                                                        "$name=$value",
-                                                        enumDot
-                                                    )
-                                                )
+                                                matchesOut.add(Match(parentClass, methodName, annotationDot, "$name=$value", enumDot))
                                             }
                                         }
                                     } catch (_: Throwable) {}
@@ -371,20 +348,15 @@ object AgentBridge {
                             }
                         }
 
-                        override fun visitFieldInsn(opcode: Int, owner: String, fname: String,
-                                                    fdesc: String) {
+                        override fun visitFieldInsn(opcode: Int, owner: String, fname: String, fdesc: String) {
                             try {
                                 if (opcode == Opcodes.GETSTATIC) {
                                     val ownerDot = owner.replace('/', '.')
                                     for (sig in forbiddenFieldSignatures) {
                                         if (sig.ownerTypeRegex.matcher(ownerDot).find()
-                                            && (sig.fieldNameRegex == null
-                                                    || sig.fieldNameRegex.matcher(fname).find())
+                                            && (sig.fieldNameRegex == null || sig.fieldNameRegex.matcher(fname).find())
                                         ) {
-                                            matchesOut.add(
-                                                Match(parentClass, methodName, ownerDot, fname,
-                                                    fdesc)
-                                            )
+                                            matchesOut.add(Match(parentClass, methodName, ownerDot, fname, fdesc))
                                         }
                                     }
                                     lastEnumLoad = owner.replace('/', '.') to fname
@@ -393,28 +365,19 @@ object AgentBridge {
                             super.visitFieldInsn(opcode, owner, fname, fdesc)
                         }
 
-                        override fun visitMethodInsn(opcode: Int, owner: String, mName: String,
-                                                     mDesc: String, itf: Boolean) {
+                        override fun visitMethodInsn(opcode: Int, owner: String, mName: String, mDesc: String, itf: Boolean) {
                             try {
                                 val ownerDot = owner.replace('/', '.')
                                 for (sig in forbiddenSignatures) {
-                                    if (sig.typeRegex.matcher(ownerDot).find()
-                                        && sig.methodRegex.matcher(mName).find()
-                                    ) {
-                                        matchesOut.add(
-                                            Match(parentClass, methodName, ownerDot, mName, mDesc)
-                                        )
+                                    if (sig.typeRegex.matcher(ownerDot).find() && sig.methodRegex.matcher(mName).find()) {
+                                        matchesOut.add(Match(parentClass, methodName, ownerDot, mName, mDesc))
                                     }
                                 }
 
                                 // catch enum.valueOf calls on the enum class itself
                                 for (fSig in forbiddenFieldSignatures) {
-                                    if (fSig.ownerTypeRegex.matcher(ownerDot).find()
-                                        && mName == "valueOf"
-                                    ) {
-                                        matchesOut.add(
-                                            Match(parentClass, methodName, ownerDot, mName, mDesc)
-                                        )
+                                    if (fSig.ownerTypeRegex.matcher(ownerDot).find() && mName == "valueOf") {
+                                        matchesOut.add(Match(parentClass, methodName, ownerDot, mName, mDesc))
                                     }
                                 }
                             } catch (_: Throwable) {}
@@ -427,20 +390,14 @@ object AgentBridge {
                                 if (value is String) {
                                     for (kw in suspiciousKeywords) {
                                         if (value.contains(kw, ignoreCase = true)) {
-                                            suspiciousCollector.add(
-                                                "const '$value' contains '$kw' in " +
-                                                        "$parentClass.$methodName"
-                                            )
+                                            suspiciousCollector.add("const '$value' contains '$kw' in $parentClass.$methodName")
                                         }
                                     }
                                     if (value.contains('.')) {
                                         for (sig in forbiddenSignatures) {
                                             try {
                                                 if (sig.typeRegex.matcher(value).matches()) {
-                                                    suspiciousCollector.add(
-                                                        "const '$value' matches forbidden " +
-                                                                "type pattern in $parentClass.$methodName"
-                                                    )
+                                                    suspiciousCollector.add("const '$value' matches forbidden type pattern in $parentClass.$methodName")
                                                 }
                                             } catch (_: Throwable) {}
                                         }
@@ -455,32 +412,98 @@ object AgentBridge {
 
             cr.accept(cv, ClassReader.SKIP_FRAMES)
             for (s in suspiciousCollector) {
-                matchesOut.add(
-                    Match(classNameRef[0] ?: "unknown", "<const>", "STRING_HINT", s, "")
-                )
+                matchesOut.add(Match(classNameRef[0] ?: "unknown", "<const>", "STRING_HINT", s, ""))
             }
         } catch (ex: Throwable) {
-            // swallow; scanning is best-effort
+            // swallow; scanning best-effort
         }
     }
 
-    private fun extractPluginNameFromJar(file: File): String? {
-        try {
-            JarFile(file).use { jf ->
-                val entry = jf.getEntry("plugin.yml") ?: return null
-                jf.getInputStream(entry).use { ins ->
-                    val text = ins.readBytes().toString(StandardCharsets.UTF_8)
-                    // naive YAML parse for "name: "
-                    val lines = text.lines()
-                    for (ln in lines) {
-                        val t = ln.trim()
-                        if (t.startsWith("name:")) {
-                            return t.substringAfter("name:").trim().trim('"', '\'')
+    /** Load plugin.yml name + class list in a single pass; cached by jar path. */
+    private fun loadPluginMeta(file: File): Pair<String?, Set<String>> {
+        val key = try { file.canonicalPath } catch (_: Throwable) { file.absolutePath }
+        return PLUGIN_META_CACHE.computeIfAbsent(key) {
+            val classes = HashSet<String>()
+            var pluginName: String? = null
+            try {
+                JarFile(file).use { jf ->
+                    val entries = jf.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        if (entry.isDirectory) continue
+                        val name = entry.name
+                        when {
+                            name.endsWith(".class") -> {
+                                classes.add(name.removeSuffix(".class").replace('/', '.'))
+                            }
+                            pluginName == null && name == "plugin.yml" -> {
+                                try {
+                                    jf.getInputStream(entry).use { ins ->
+                                        val text = ins.readBytes().toString(StandardCharsets.UTF_8)
+                                        for (ln in text.lines()) {
+                                            val t = ln.trim()
+                                            if (t.startsWith("name:")) {
+                                                pluginName = t.substringAfter("name:").trim().trim('"', '\'')
+                                                break
+                                            }
+                                        }
+                                    }
+                                } catch (_: Throwable) {
+                                    // ignore read/parse errors and continue
+                                }
+                            }
                         }
                     }
                 }
+            } catch (_: Throwable) {
+                // ignore; return whatever we collected (possibly empty)
             }
-        } catch (_: Throwable) {}
-        return null
+            pluginName to classes
+        }
+    }
+
+    /** Public: returns the set of class FQCNs in the jar (single-pass cached). */
+    fun extractClassNamesFromJar(file: File): Set<String> {
+        return loadPluginMeta(file).second
+    }
+
+    /** Private: returns plugin name from plugin.yml if present (single-pass cached). */
+    private fun extractPluginNameFromJar(file: File): String? {
+        return loadPluginMeta(file).first
+    }
+
+    /** Remove cached meta for this jar (call if you delete/quarantine the jar). */
+    fun clearPluginMetaCache(file: File) {
+        val key = try { file.canonicalPath } catch (_: Throwable) { file.absolutePath }
+        PLUGIN_META_CACHE.remove(key)
+    }
+
+    /** Register all class FQCNs that belong to a plugin (called before plugin load). */
+    fun registerPluginClasses(pluginName: String, classes: Collection<String>) {
+        for (c in classes) {
+            CLASS_TO_PLUGIN[c] = pluginName
+        }
+    }
+
+    /** Unregister classes and also evict cached metadata for the plugin. */
+    fun unregisterPluginClasses(pluginName: String) {
+        // remove class -> plugin mapping
+        for (entry in CLASS_TO_PLUGIN.entries.toList()) {
+            if (entry.value == pluginName) {
+                CLASS_TO_PLUGIN.remove(entry.key, pluginName)
+            }
+        }
+        // evict any cached jar meta that has this pluginName
+        for (entry in PLUGIN_META_CACHE.entries.toList()) {
+            val meta = entry.value
+            if (meta.first == pluginName) {
+                PLUGIN_META_CACHE.remove(entry.key, meta)
+            }
+        }
+    }
+
+    /** Fast lookup by class name -> plugin name (or null). */
+    fun findPluginForClass(className: String): String? {
+        return CLASS_TO_PLUGIN[className]
     }
 }

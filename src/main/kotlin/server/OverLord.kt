@@ -3,6 +3,7 @@ package server
 import org.bukkit.plugin.java.JavaPlugin
 import server.Watchdog.DiscordEmbedBuilder
 import server.agent.AgentBridge
+import server.agent.NetworkInjector
 import server.brigadier.CommandRegistrar
 import server.packet.PacketListenerInjector
 import server.resourcepack.PackCommand
@@ -24,6 +25,8 @@ class OverLord : JavaPlugin() {
 
         log = PluginLogger(this, debugEnabled = true)
         log.info("OverLord Loaded, logger enabled.")
+
+        networkInjector = NetworkInjector()
 
         log.info("OverLord-Agent: Adding forbidden signatures.")
 
@@ -90,6 +93,8 @@ class OverLord : JavaPlugin() {
             }
 
             var canLoad = true
+
+            networkInjector.instrumentJar(candidate.file.toFile())
 
             if (!AgentBridge.isJarAllowed(candidate.file.toFile(), true)) {
                 canLoad = false
@@ -169,6 +174,8 @@ class OverLord : JavaPlugin() {
 
         @JvmStatic
         lateinit var packManager: PackManager
+
+        lateinit var networkInjector: NetworkInjector
 
 
 
