@@ -30,6 +30,37 @@ data class ForbiddenSignature(val typeRegex: Pattern, val methodRegex: Pattern, 
             : this(Pattern.compile(typeRegex), Pattern.compile(methodRegex), desc)
 }
 
+data class ForbiddenAnnotationSignature(
+    val annotationTypeRegex: Pattern,
+    val enumTypeRegex: Pattern? = null,
+    val paramName: String? = null,
+    val desc: String? = null
+) {
+    constructor(
+        annotationTypeRegex: String,
+        enumTypeRegex: String? = null,
+        paramName: String? = null,
+        desc: String? = null
+    ) : this(
+        Pattern.compile(annotationTypeRegex),
+        enumTypeRegex?.let { Pattern.compile(it) },
+        paramName,
+        desc
+    )
+}
+
+data class ForbiddenFieldSignature(
+    val ownerTypeRegex: Pattern,
+    val fieldNameRegex: Pattern? = null,
+    val desc: String? = null
+) {
+    constructor(ownerTypeRegex: String, fieldNameRegex: String? = null,
+                desc: String? = null)
+            : this(Pattern.compile(ownerTypeRegex),
+        fieldNameRegex?.let { Pattern.compile(it) },
+        desc)
+}
+
 data class Match(
     val classContainingCall: String,
     val methodContainingCall: String,
@@ -44,6 +75,7 @@ data class ForbiddenScanResult(
     val suspiciousStrings: List<String>
 )
 
+@Suppress("unused")
 object AgentBridge {
     private const val ASM_API = Opcodes.ASM9
     private val INCIDENTS = ConcurrentLinkedQueue<Incident>()
@@ -54,6 +86,8 @@ object AgentBridge {
     }
 
     private val forbiddenSignatures = CopyOnWriteArrayList<ForbiddenSignature>()
+    private val forbiddenAnnotationSignatures = CopyOnWriteArrayList<ForbiddenAnnotationSignature>()
+    private val forbiddenFieldSignatures = CopyOnWriteArrayList<ForbiddenFieldSignature>()
 
     // additional keyword heuristics (will flag LDC strings)
     private val suspiciousKeywords = listOf(
@@ -63,12 +97,33 @@ object AgentBridge {
 
 
 
-    fun addForbiddenSignature(typeRegex: String, methodRegex: String, description: String? = null) {
+    fun addForbiddenSignature(typeRegex: String, methodRegex: String, description: String? = null) =
         forbiddenSignatures.add(ForbiddenSignature(typeRegex, methodRegex, description))
-    }
+
 
     fun clearForbiddenSignatures() {
         forbiddenSignatures.clear()
+    }
+
+    fun addForbiddenAnnotationSignature(
+        annotationTypeRegex: String,
+        enumTypeRegex: String? = null,
+        paramName: String? = null,
+        description: String? = null
+    ) = forbiddenAnnotationSignatures.add(ForbiddenAnnotationSignature(annotationTypeRegex, enumTypeRegex, paramName, description))
+
+
+    fun clearForbiddenAnnotationSignatures() {
+        forbiddenAnnotationSignatures.clear()
+    }
+
+
+    fun addForbiddenFieldSignature(ownerTypeRegex: String, fieldNameRegex: String? = null, description: String? = null)  =
+        forbiddenFieldSignatures.add(ForbiddenFieldSignature(ownerTypeRegex, fieldNameRegex, description))
+
+
+    fun clearForbiddenFieldSignatures() {
+        forbiddenFieldSignatures.clear()
     }
 
     /**
@@ -107,7 +162,6 @@ object AgentBridge {
                                 }
                             }
                         } catch (_: Throwable) {}
-                    } else {
                     }
                 }
             }
@@ -218,6 +272,7 @@ object AgentBridge {
         writer.shutdownNow()
     }
 
+
     private fun scanClassStream(ins: InputStream, matchesOut: MutableList<Match>) {
         try {
             val cr = ClassReader(ins.readBytes())
@@ -225,25 +280,145 @@ object AgentBridge {
             val suspiciousCollector = ArrayList<String>()
 
             val cv = object : ClassVisitor(ASM_API) {
-                override fun visit(version: Int, access: Int, name: String?, signature: String?, superName: String?, interfaces: Array<out String>?) {
+                override fun visit(
+                    version: Int,
+                    access: Int,
+                    name: String?,
+                    signature: String?,
+                    superName: String?,
+                    interfaces: Array<out String>?
+                ) {
                     classNameRef[0] = name?.replace('/', '.')
                     super.visit(version, access, name, signature, superName, interfaces)
                 }
 
-                override fun visitMethod(access: Int, name: String?, descriptor: String?, signature: String?, exceptions: Array<out String>?): MethodVisitor {
-                    val methodName = name ?: "<init?>"
-                    val parentClass = classNameRef[0] ?: "unknown"
-                    return object : MethodVisitor(ASM_API) {
-                        override fun visitMethodInsn(opcode: Int, owner: String, mName: String, mDesc: String, itf: Boolean) {
+                override fun visitAnnotation(desc: String?, visible: Boolean): AnnotationVisitor {
+                    val av = super.visitAnnotation(desc, visible)
+                    return object : AnnotationVisitor(ASM_API, av) {
+                        override fun visitEnum(name: String?, descriptor: String?, value: String?) {
                             try {
-                                val ownerDot = owner.replace('/', '.')
-                                // check each forbidden signature
-                                for (sig in forbiddenSignatures) {
-                                    if (sig.typeRegex.matcher(ownerDot).find() && sig.methodRegex.matcher(mName).find()) {
-                                        matchesOut.add(Match(parentClass, methodName, ownerDot, mName, mDesc))
+                                val annotationDot = desc?.removePrefix("L")
+                                    ?.removeSuffix(";")?.replace('/', '.') ?: return
+                                val enumDot = descriptor?.removePrefix("L")
+                                    ?.removeSuffix(";")?.replace('/', '.') ?: return
+
+                                for (sig in forbiddenAnnotationSignatures) {
+                                    if (sig.annotationTypeRegex.matcher(annotationDot).find()
+                                        && (sig.enumTypeRegex == null
+                                                || sig.enumTypeRegex.matcher(enumDot).find())
+                                        && (sig.paramName == null || sig.paramName == name)
+                                    ) {
+                                        matchesOut.add(
+                                            Match(
+                                                classNameRef[0] ?: "unknown",
+                                                "<class>",
+                                                annotationDot,
+                                                "$name=$value",
+                                                enumDot
+                                            )
+                                        )
                                     }
                                 }
                             } catch (_: Throwable) {}
+                            super.visitEnum(name, descriptor, value)
+                        }
+                    }
+                }
+
+                override fun visitMethod(
+                    access: Int,
+                    name: String?,
+                    descriptor: String?,
+                    signature: String?,
+                    exceptions: Array<out String>?
+                ): MethodVisitor {
+                    val methodName = name ?: "<init?>"
+                    val parentClass = classNameRef[0] ?: "unknown"
+                    var lastEnumLoad: Pair<String, String>? = null
+
+                    return object : MethodVisitor(ASM_API) {
+                        override fun visitAnnotation(desc: String?, visible: Boolean): AnnotationVisitor {
+                            val av = super.visitAnnotation(desc, visible)
+                            return object : AnnotationVisitor(ASM_API, av) {
+                                override fun visitEnum(name: String?, descriptor: String?,
+                                                       value: String?) {
+                                    try {
+                                        val annotationDot = desc?.removePrefix("L")
+                                            ?.removeSuffix(";")?.replace('/', '.') ?: return
+                                        val enumDot = descriptor?.removePrefix("L")
+                                            ?.removeSuffix(";")?.replace('/', '.') ?: return
+
+                                        for (sig in forbiddenAnnotationSignatures) {
+                                            if (sig.annotationTypeRegex.matcher(annotationDot).find()
+                                                && (sig.enumTypeRegex == null
+                                                        || sig.enumTypeRegex.matcher(enumDot).find())
+                                                && (sig.paramName == null || sig.paramName == name)
+                                            ) {
+                                                matchesOut.add(
+                                                    Match(
+                                                        parentClass,
+                                                        methodName,
+                                                        annotationDot,
+                                                        "$name=$value",
+                                                        enumDot
+                                                    )
+                                                )
+                                            }
+                                        }
+                                    } catch (_: Throwable) {}
+                                    super.visitEnum(name, descriptor, value)
+                                }
+                            }
+                        }
+
+                        override fun visitFieldInsn(opcode: Int, owner: String, fname: String,
+                                                    fdesc: String) {
+                            try {
+                                if (opcode == Opcodes.GETSTATIC) {
+                                    val ownerDot = owner.replace('/', '.')
+                                    for (sig in forbiddenFieldSignatures) {
+                                        if (sig.ownerTypeRegex.matcher(ownerDot).find()
+                                            && (sig.fieldNameRegex == null
+                                                    || sig.fieldNameRegex.matcher(fname).find())
+                                        ) {
+                                            matchesOut.add(
+                                                Match(parentClass, methodName, ownerDot, fname,
+                                                    fdesc)
+                                            )
+                                        }
+                                    }
+                                    lastEnumLoad = owner.replace('/', '.') to fname
+                                }
+                            } catch (_: Throwable) {}
+                            super.visitFieldInsn(opcode, owner, fname, fdesc)
+                        }
+
+                        override fun visitMethodInsn(opcode: Int, owner: String, mName: String,
+                                                     mDesc: String, itf: Boolean) {
+                            try {
+                                val ownerDot = owner.replace('/', '.')
+                                for (sig in forbiddenSignatures) {
+                                    if (sig.typeRegex.matcher(ownerDot).find()
+                                        && sig.methodRegex.matcher(mName).find()
+                                    ) {
+                                        matchesOut.add(
+                                            Match(parentClass, methodName, ownerDot, mName, mDesc)
+                                        )
+                                    }
+                                }
+
+                                // catch enum.valueOf calls on the enum class itself
+                                for (fSig in forbiddenFieldSignatures) {
+                                    if (fSig.ownerTypeRegex.matcher(ownerDot).find()
+                                        && mName == "valueOf"
+                                    ) {
+                                        matchesOut.add(
+                                            Match(parentClass, methodName, ownerDot, mName, mDesc)
+                                        )
+                                    }
+                                }
+                            } catch (_: Throwable) {}
+                            lastEnumLoad = null
                             super.visitMethodInsn(opcode, owner, mName, mDesc, itf)
                         }
 
@@ -252,15 +427,20 @@ object AgentBridge {
                                 if (value is String) {
                                     for (kw in suspiciousKeywords) {
                                         if (value.contains(kw, ignoreCase = true)) {
-                                            suspiciousCollector.add("const '$value' contains '$kw' in $parentClass.$methodName")
+                                            suspiciousCollector.add(
+                                                "const '$value' contains '$kw' in " +
+                                                        "$parentClass.$methodName"
+                                            )
                                         }
                                     }
-                                    // also check if string looks like FQCN and matches type regex
-                                    if (value.contains('.') ) {
+                                    if (value.contains('.')) {
                                         for (sig in forbiddenSignatures) {
                                             try {
                                                 if (sig.typeRegex.matcher(value).matches()) {
-                                                    suspiciousCollector.add("const '$value' matches forbidden type pattern in $parentClass.$methodName")
+                                                    suspiciousCollector.add(
+                                                        "const '$value' matches forbidden " +
+                                                                "type pattern in $parentClass.$methodName"
+                                                    )
                                                 }
                                             } catch (_: Throwable) {}
                                         }
@@ -274,19 +454,19 @@ object AgentBridge {
             }
 
             cr.accept(cv, ClassReader.SKIP_FRAMES)
-            // if suspiciousCollector not empty, add them to matchesOut as pseudo matches
             for (s in suspiciousCollector) {
-                // create a pseudo-match with owner=STRING_HINT and methodName = s truncated
-                matchesOut.add(Match(classNameRef[0] ?: "unknown", "<const>", "STRING_HINT", s, ""))
+                matchesOut.add(
+                    Match(classNameRef[0] ?: "unknown", "<const>", "STRING_HINT", s, "")
+                )
             }
         } catch (ex: Throwable) {
-            // swallow; scanning best-effort
+            // swallow; scanning is best-effort
         }
     }
 
     private fun extractPluginNameFromJar(file: File): String? {
         try {
-            java.util.jar.JarFile(file).use { jf ->
+            JarFile(file).use { jf ->
                 val entry = jf.getEntry("plugin.yml") ?: return null
                 jf.getInputStream(entry).use { ins ->
                     val text = ins.readBytes().toString(StandardCharsets.UTF_8)

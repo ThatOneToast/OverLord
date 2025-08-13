@@ -1,13 +1,10 @@
 package server
 
-import org.bukkit.event.server.PluginEvent
-import org.bukkit.event.world.ChunkLoadEvent
 import org.bukkit.plugin.java.JavaPlugin
 import server.Watchdog.DiscordEmbedBuilder
 import server.agent.AgentBridge
 import server.brigadier.CommandRegistrar
 import server.packet.PacketListenerInjector
-import server.processors.EventPriorityRemover
 import server.resourcepack.PackCommand
 import server.resourcepack.PackManager
 import server.resourcepack.PackUpdateListener
@@ -29,6 +26,8 @@ class OverLord : JavaPlugin() {
         log.info("OverLord Loaded, logger enabled.")
 
         log.info("OverLord-Agent: Adding forbidden signatures.")
+
+        // ---------------------------- METHOD SIGNATURES  ----------------------------
         AgentBridge.addForbiddenSignature(
             ".*CraftWorld.*",
             "setChunkForceLoaded",
@@ -49,7 +48,22 @@ class OverLord : JavaPlugin() {
             "setChunkForceLoaded",
             "Bukkit API force-load"
         )
-        
+
+        // ---------------------------- ANNOTATION SIGNATURES  ----------------------------
+        AgentBridge.addForbiddenAnnotationSignature(
+            "org\\.bukkit\\.event\\.EventHandler",
+            "org\\.bukkit\\.event\\.EventPriority",
+            "priority",
+            "Bukkit API - Event priority (annotation)"
+        )
+
+        // ---------------------------- FIELD SIGNATURES  ----------------------------
+        AgentBridge.addForbiddenFieldSignature(
+            "org\\.bukkit\\.event\\.EventPriority",
+            null,
+            "Bukkit API - Event priority (enum constant usage)"
+        )
+
 
         val pluginsFolder = this.dataFolder.absolutePath + "/plugins"
         if (!Path(pluginsFolder).exists()) {
@@ -75,30 +89,10 @@ class OverLord : JavaPlugin() {
                 break
             }
 
-            var canLoad = false
+            var canLoad = true
 
-            if (!AgentBridge.isJarAllowed(candidate.file.toFile(), true)) return;
-            val processors = listOf(EventPriorityRemover())
-            val jarSanitizer = JarSanitizer(processors)
-
-            val before = jarSanitizer.processJar(candidate.file, Mode.SCAN)
-            if (before.findings.isNotEmpty()) {
-                log.warn("Plugin %s has %s possible rule breakers.", candidate.name, before.findings.size)
-                log.warn("Attempting to sanitize %s", candidate.name)
-
-                val sanitizeReport = jarSanitizer.processJar(candidate.file, Mode.SANITIZE)
-                log.debug("Sanitize modified classes: %s".format(sanitizeReport.modifiedClasses.size))
-
-                val after = jarSanitizer.processJar(candidate.file, Mode.SCAN)
-                if (after.findings.isNotEmpty()) {
-                    log.warn("Plugin %s still has %s possible rule breakers after sanitization; will not be loaded.",
-                        candidate.name, after.findings.size)
-                    log.debug("Plugin %s final report: %s", candidate.name, after)
-                } else {
-                    canLoad = true
-                }
-            } else {
-                canLoad = true
+            if (!AgentBridge.isJarAllowed(candidate.file.toFile(), true)) {
+                canLoad = false
             }
 
             if (canLoad) {
